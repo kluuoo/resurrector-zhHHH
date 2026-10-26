@@ -1,0 +1,82 @@
+name: Build Windows EXE
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.23'
+        cache: false 
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '22'
+
+    - name: Setup pnpm
+      uses: pnpm/action-setup@v4
+      with:
+        run_install: false
+
+    - name: Install Wails v2 CLI
+      run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
+
+    # 1. 强行生成占位 ico，预防 pattern icon.ico 找不到的报错
+    - name: Generate Placeholder Icon
+      shell: pwsh
+      run: |
+        $base64 = "AAABAAEAAQEAAAEAIAAwAAAAFgAAACgAAAABAAAAAgAAAAEAIAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAD///8AAAAAAA=="
+        $bytes = [Convert]::FromBase64String($base64)
+        [IO.File]::WriteAllBytes("core/icon.ico", $bytes)
+        Write-Host "✅ Icon.ico 已成功生成"
+
+    # 2. 同步工作区依赖，解决 go.work 找不到模块的问题
+    - name: Sync Go Workspace
+      run: go work sync
+
+    # 3. 编译核心守护程序 resurrector.exe（隐藏黑框）
+    - name: Build Core App
+      run: go build -ldflags="-H windowsgui" -o core/resurrector.exe ./core
+
+    # 4. 编译汉化界面 resurrector-ui.exe（隐藏黑框，禁用 -s -w 防止闪退）
+    - name: Build UI App
+      working-directory: ./ui
+      run: wails build -clean -ldflags="-H windowsgui"
+
+    # 5. 智能整理并重命名发布文件
+    - name: Prepare Release Folder
+      shell: pwsh
+      run: |
+        New-Item -ItemType Directory -Force -Path Release
+        
+        # 放入核心程序
+        Copy-Item -Path "core\resurrector.exe" -Destination "Release\"
+        
+        # 智能抓取 Wails 编译产物并重命名为标准名称
+        $uiExe = Get-ChildItem -Path "ui\build\bin\*.exe" | Select-Object -First 1
+        if ($uiExe) {
+            Copy-Item -Path $uiExe.FullName -Destination "Release\resurrector-ui.exe"
+            Write-Host "✅ 成功抓取并重命名 UI 程序"
+        } else {
+            Write-Error "❌ 找不到 Wails 编译的 UI 程序！"
+            exit 1
+        }
+
+    # 6. 上传打包好的最终产物
+    - name: Upload Final Package
+      uses: actions/upload-artifact@v4
+      with:
+        name: Resurrector-ZH-Final
+        path: Release/
+        if-no-files-found: error
